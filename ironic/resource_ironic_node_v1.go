@@ -1,6 +1,7 @@
 package ironic
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack/baremetal/v1/nodes"
@@ -64,7 +65,7 @@ func resourceNodeV1() *schema.Resource {
 				Sensitive: true,
 			},
 			"properties": {
-				Type:     schema.TypeMap,
+				Type:     schema.TypeString,
 				Optional: true,
 			},
 			"extra": {
@@ -297,6 +298,12 @@ func resourceNodeV1Read(d *schema.ResourceData, meta interface{}) error {
 	d.Set("provision_state", node.ProvisionState)
 	d.Set("target_provision_state", node.TargetProvisionState)
 
+	// Properties is JSON in a string
+	if node.Properties != nil {
+		result, _ := json.Marshal(node.Properties)
+		d.Set("properties", string(result))
+	}
+
 	return nil
 }
 
@@ -341,6 +348,19 @@ func resourceNodeV1Update(d *schema.ResourceData, meta interface{}) error {
 		}
 	}
 
+	// Properties is special - we need to convert JSON back to map
+	if d.HasChange("properties") {
+		if _, err := nodes.Update(client, d.Id(), nodes.UpdateOpts{
+			nodes.UpdateOperation{
+				Op:    nodes.ReplaceOp,
+				Path:  fmt.Sprintf("/%s", field),
+				Value: jsonToMap(d.Get("properties")),
+			},
+		}).Extract(); err != nil {
+			return err
+		}
+	}
+
 	// Update provision state if required - this could take a while
 	if d.HasChange("target_provision_state") {
 		if err := changeProvisionStateToTarget(d, client); err != nil {
@@ -361,7 +381,6 @@ func resourceNodeV1Delete(d *schema.ResourceData, meta interface{}) error {
 }
 
 // Convert terraform schema to gophercloud CreateOpts
-// TODO: Is there a better way to do this? Annotations?
 func schemaToCreateOpts(d *schema.ResourceData) *nodes.CreateOpts {
 	return &nodes.CreateOpts{
 		BootInterface:       d.Get("boot_interface").(string),
@@ -371,6 +390,7 @@ func schemaToCreateOpts(d *schema.ResourceData) *nodes.CreateOpts {
 		Driver:              d.Get("driver").(string),
 		DriverInfo:          d.Get("driver_info").(map[string]interface{}),
 		Extra:               d.Get("extra").(map[string]interface{}),
+		Properties:          jsonToMap(d.Get("properties")),
 		InspectInterface:    d.Get("inspect_interface").(string),
 		ManagementInterface: d.Get("management_interface").(string),
 		Name:                d.Get("name").(string),
@@ -383,6 +403,14 @@ func schemaToCreateOpts(d *schema.ResourceData) *nodes.CreateOpts {
 		StorageInterface:    d.Get("storage_interface").(string),
 		VendorInterface:     d.Get("vendor_interface").(string),
 	}
+}
+
+// Terraform HCL does not handle nested data structures, a map may only be a
+// a map of strings.  However, we must support this for some fields like properties,
+// so instead this is delivered as JSON in a string.
+func jsonToMap(properties interface{}) (result map[string]interface{}) {
+	json.Unmarshal([]byte(properties.(string)), result)
+	return
 }
 
 // provisionStateWorkflow is used to track state through the process of updating's it's provision state
