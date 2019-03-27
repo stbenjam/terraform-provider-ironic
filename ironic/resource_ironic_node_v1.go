@@ -154,6 +154,10 @@ func resourceNodeV1() *schema.Resource {
 				Type:     schema.TypeMap,
 				Optional: true,
 			},
+			"last_error": {
+				Type: schema.TypeString,
+				Computed: true,
+			},
 		},
 	}
 }
@@ -296,6 +300,7 @@ func resourceNodeV1Read(d *schema.ResourceData, meta interface{}) error {
 	d.Set("vendor_interface", node.VendorInterface)
 	d.Set("provision_state", node.ProvisionState)
 	d.Set("target_provision_state", node.TargetProvisionState)
+	d.Set("last_error", node.LastError)
 
 	return nil
 }
@@ -520,6 +525,9 @@ func (workflow *provisionStateWorkflow) toActive() (bool, error) {
 		log.Printf("[DEBUG] Node %s is 'available', going to change to 'active'.", workflow.d.Id())
 		workflow.wait = 30 * time.Second // Deployment takes a while
 		return workflow.changeProvisionState(nodes.TargetActive)
+	case "deploy failed":
+		log.Printf("[ERROR] Node %s failed to deploy, last_error was: %s.", workflow.d.Id(), workflow.d.Get("last_error").(string))
+		return true, fmt.Errorf("deployment failed")
 	default:
 		// Otherwise we have to get into available state first
 		log.Printf("[DEBUG] Node %s is '%s', going to change to 'available'.", workflow.d.Id(), state)
