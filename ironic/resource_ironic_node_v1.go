@@ -64,6 +64,10 @@ func resourceNodeV1() *schema.Resource {
 				// driver_info could contain passwords
 				Sensitive: true,
 			},
+			"inspect": {
+				Type:     schema.TypeBool,
+				Optional: true,
+			},
 			"properties": {
 				Type:     schema.TypeMap,
 				Optional: true,
@@ -162,6 +166,10 @@ func resourceNodeV1() *schema.Resource {
 			"power_state_timeout": {
 				Type:     schema.TypeInt,
 				Optional: true,
+			},
+			"last_error": {
+				Type:     schema.TypeString,
+				Computed: true,
 			},
 			// FIXME: Suppress config drive on updates
 			"user_data": {
@@ -314,6 +322,7 @@ func resourceNodeV1Read(d *schema.ResourceData, meta interface{}) error {
 	d.Set("driver_info", node.DriverInfo)
 	d.Set("extra", node.Extra)
 	d.Set("inspect_interface", node.InspectInterface)
+	d.Set("last_error", node.LastError)
 	d.Set("management_interface", node.ManagementInterface)
 	d.Set("name", node.Name)
 	d.Set("network_interface", node.NetworkInterface)
@@ -422,7 +431,6 @@ func propertiesMerge(d *schema.ResourceData, key string) map[string]interface{} 
 }
 
 // Convert terraform schema to gophercloud CreateOpts
-// TODO: Is there a better way to do this? Annotations?
 func schemaToCreateOpts(d *schema.ResourceData) *nodes.CreateOpts {
 	properties := propertiesMerge(d, "root_device")
 	return &nodes.CreateOpts{
@@ -450,10 +458,17 @@ func schemaToCreateOpts(d *schema.ResourceData) *nodes.CreateOpts {
 
 // provisionStateWorkflow is used to track state through the process of updating's it's provision state
 type provisionStateWorkflow struct {
+	// Gophercloud API client
 	client *gophercloud.ServiceClient
-	d      *schema.ResourceData
+
+	// Ref to our resource
+	d *schema.ResourceData
+
+	// Final target provision state
 	target string
-	wait   time.Duration
+
+	// How long to wait before polling Ironic again
+	wait time.Duration
 }
 
 // Drive Ironic's state machine through the process to reach our desired end state. This requires multiple
@@ -500,6 +515,14 @@ func (workflow *provisionStateWorkflow) next() (done bool, err error) {
 
 	log.Printf("[DEBUG] Node current state is '%s'", workflow.d.Get("provision_state").(string))
 
+	// Out-of-band change: inspection occurs if inspect = true, and node is in manageable state
+	if workflow.d.Get("provision_state").(string) == nodes.Manageable && workflow.d.Get("inspect").(bool) {
+		err := workflow.inspect()
+		if err != nil {
+			return true, fmt.Errorf("could not inspect: %s", err)
+		}
+	}
+
 	switch target := nodes.TargetProvisionState(workflow.target); target {
 	case nodes.TargetManage:
 		return workflow.toManageable()
@@ -518,24 +541,64 @@ func (workflow *provisionStateWorkflow) next() (done bool, err error) {
 func (workflow *provisionStateWorkflow) toManageable() (done bool, err error) {
 	switch state := workflow.d.Get("provision_state").(string); state {
 	case "manageable":
-		// We're done!
-		return true, err
-	case "enroll",
-		"adopt failed",
+		return true, nil
+	case "enroll":
+		// If we are in 'enroll' and last_error is set, then we previously tried to set
+		// manage, and it failed.  We need this check to avoid an infinite loop of going
+		// between enroll and manage.
+		if lastError := workflow.d.Get("last_error").(string); lastError != "" {
+			return true, fmt.Errorf("%s", lastError)
+		} else {
+			_, err := workflow.changeProvisionState(nodes.TargetManage)
+			if err != nil {
+				return true, err
+			}
+			return false, err
+		}
+	case "adopt failed",
 		"clean failed",
 		"inspect failed",
 		"available":
-		return workflow.changeProvisionState(nodes.TargetManage)
+		return true, fmt.Errorf("manage failed: %s", workflow.d.Get("last_error").(string))
 	case "verifying":
 		// Not done, no error - Ironic is working
 		return false, nil
 
 	default:
-		// TODO: If node is not in a position to go back to manageable, should we delete it (ForceNew) and create it again?
 		return true, fmt.Errorf("cannot go from state '%s' to state 'manageable'", state)
 	}
+}
 
-	return false, nil
+// Inspection is a little special, since it's a stop along the way to `manageable` if the user
+// set inspect = true in the resource
+func (workflow *provisionStateWorkflow) inspect() (err error) {
+	log.Printf("[DEBUG] Going to inspect node '%s'", workflow.d.Id())
+
+	for inspected := false; !inspected; resourcePortV1Read(workflow.d, workflow.client) {
+		switch state := workflow.d.Get("provision_state").(string); state {
+		case "manageable":
+			if inspected {
+				// Node was inspected, and returned to manageable state - we're done here
+				return nil
+			} else {
+				// Node hasn't been inspected yet - kick off inspection
+				_, err := workflow.changeProvisionState(nodes.TargetInspect)
+				if err != nil {
+					return err
+				}
+				inspected = true
+			}
+		case "inspecting",
+			"inspect wait":
+			continue // Ironic is working
+		case "inspect failed":
+			return fmt.Errorf("inspect failed: %s", workflow.d.Get("last_error").(string))
+		default:
+			return nil
+		}
+	}
+
+	return
 }
 
 // Change a node to "available" state
@@ -546,8 +609,8 @@ func (workflow *provisionStateWorkflow) toAvailable() (done bool, err error) {
 		return true, nil
 	case "cleaning",
 		"clean wait":
-		// Not done, no error - Ironic is working
 		log.Printf("[DEBUG] Node %s is '%s', waiting for Ironic to finish.", workflow.d.Id(), state)
+		// Not done, no error - Ironic is working
 		return false, nil
 	case "manageable":
 		// From manageable, we can go to provide
@@ -562,8 +625,6 @@ func (workflow *provisionStateWorkflow) toAvailable() (done bool, err error) {
 		}
 		return false, nil
 	}
-
-	return false, nil
 }
 
 // Change a node to "active" state
@@ -584,6 +645,8 @@ func (workflow *provisionStateWorkflow) toActive() (bool, error) {
 		log.Printf("[DEBUG] Node %s is 'available', going to change to 'active'.", workflow.d.Id())
 		workflow.wait = 30 * time.Second // Deployment takes a while
 		return workflow.changeProvisionState(nodes.TargetActive)
+	case "deploy failed":
+		return true, fmt.Errorf("deploy failed: %s", workflow.d.Get("last_error").(string))
 	default:
 		// Otherwise we have to get into available state first
 		log.Printf("[DEBUG] Node %s is '%s', going to change to 'available'.", workflow.d.Id(), state)
@@ -617,8 +680,6 @@ func (workflow *provisionStateWorkflow) toDeleted() (bool, error) {
 	default:
 		return true, fmt.Errorf("cannot delete node in state '%s'", state)
 	}
-
-	return false, nil
 }
 
 // Builds the ProvisionStateOpts to send to Ironic -- including config drive.

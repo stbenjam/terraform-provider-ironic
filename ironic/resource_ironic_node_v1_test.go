@@ -16,7 +16,6 @@ func TestAccIronicNode(t *testing.T) {
 		Providers:    testAccProviders,
 		CheckDestroy: testAccNodeDestroy,
 		Steps: []resource.TestStep{
-
 			// Create a node and check that it exists
 			{
 				Config: testAccNodeResource(""),
@@ -28,13 +27,19 @@ func TestAccIronicNode(t *testing.T) {
 				),
 			},
 
-			// Change the node's provision state to 'available'
+			// Change the node's provision state to 'available', and inspect the node
+			// in the process.
 			{
-				Config: testAccNodeResource("target_provision_state = \"provide\""),
+				Config: testAccNodeResource(`
+					target_provision_state = "provide"
+					inspect = true
+				`),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckNodeExists("ironic_node_v1.node-0"),
 					resource.TestCheckResourceAttr("ironic_node_v1.node-0",
 						"provision_state", "available"),
+					resource.TestCheckResourceAttrSet("ironic_node_v1.node-0",
+						"inspection_finished_at"),
 				),
 			},
 
@@ -73,6 +78,18 @@ func TestAccIronicNode(t *testing.T) {
 					testAccCheckNodeExists("ironic_node_v1.node-0"),
 					resource.TestCheckResourceAttr("ironic_node_v1.node-0",
 						"power_state", "power on"),
+				),
+			},
+
+			// Change the node's provision state to 'active'
+			{
+				Config: testAccNodeResource(`
+					target_provision_state = "active"
+				`),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckNodeExists("ironic_node_v1.node-0"),
+					resource.TestCheckResourceAttr("ironic_node_v1.node-0",
+						"provision_state", "active"),
 				),
 			},
 		},
@@ -127,6 +144,7 @@ func testAccNodeResource(extraValue string) string {
 			deploy_interface = "fake"
 			management_interface = "fake"
 			power_interface = "fake"
+            inspect_interface = "fake"
 			resource_class = "baremetal"
 			vendor_interface = "no-vendor"
 
