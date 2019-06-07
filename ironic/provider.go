@@ -30,6 +30,9 @@ func Provider() terraform.ResourceProvider {
 			"ironic_allocation_v1": resourceAllocationV1(),
 			"ironic_deployment":    resourceDeployment(),
 		},
+		DataSourcesMap: map[string]*schema.Resource{
+			"ironic_api": dataSourceIronicAPI(),
+		},
 		ConfigureFunc: configureProvider,
 	}
 }

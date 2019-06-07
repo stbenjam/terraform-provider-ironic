@@ -3,14 +3,33 @@ package testhelper
 import (
 	"fmt"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
 
+
+
 func init() {
 	// Ensure we seed the RNG so generated names aren't deterministic
 	rand.Seed(time.Now().UTC().UnixNano())
+
+}
+
+var (
+	Mux    *http.ServeMux
+	Server *httptest.Server
+)
+
+func SetupHTTP() {
+	Mux = http.NewServeMux()
+	Server = httptest.NewServer(Mux)
+}
+
+func TeardownHTTP() {
+	Server.Close()
 }
 
 func AssertNoError(t *testing.T, err error) {
