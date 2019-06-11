@@ -33,3 +33,4 @@ func RandomString(prefix string, length int) string {
 
 	return fmt.Sprintf("%s%s", prefix, string(b))
 }
+
